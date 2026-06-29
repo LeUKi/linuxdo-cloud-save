@@ -1,0 +1,8 @@
+# Copy this file to .dev.vars for local `wrangler dev` only.
+# Do not commit real values.
+
+LINUX_DO_CLIENT_ID="replace-with-linux-do-oauth-client-id"
+LINUX_DO_CLIENT_SECRET="replace-with-linux-do-oauth-client-secret"
+SERVICE_TOKEN_PEPPER="replace-with-random-long-pepper"
+SERVICE_TOKEN_ENCRYPTION_KEY="replace-with-random-long-encryption-key"
+JWT_SIGNING_SECRET="replace-with-random-long-jwt-secret"

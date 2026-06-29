@@ -1,0 +1,31 @@
+{
+  "name": "linuxdo-cloud-save",
+  "version": "0.1.0",
+  "description": "Linux DO OAuth backed cloud-save Worker for self-authored applications.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply linuxdo-cloud-save --local",
+    "db:migrate:remote": "wrangler d1 migrations apply linuxdo-cloud-save --remote"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.27",
+    "jose": "^6.2.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260628.1",
+    "@types/node": "^26.0.1",
+    "drizzle-kit": "^0.31.10",
+    "miniflare": "4.20260625.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9",
+    "wrangler": "^4.105.0"
+  }
+}

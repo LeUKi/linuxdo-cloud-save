@@ -1,0 +1,21 @@
+export interface WorkerEnv {
+  DB: D1Database;
+  LINUX_DO_CLIENT_ID: string;
+  LINUX_DO_CLIENT_SECRET: string;
+  SERVICE_TOKEN_PEPPER: string;
+  SERVICE_TOKEN_ENCRYPTION_KEY: string;
+  JWT_SIGNING_SECRET: string;
+  SERVICE_ISSUER: string;
+  LINUX_DO_OAUTH_AUTHORIZE_URL: string;
+  LINUX_DO_OAUTH_TOKEN_URL: string;
+  LINUX_DO_USERINFO_URL: string;
+}
+
+export type AppBindings = {
+  Bindings: WorkerEnv;
+  Variables: {
+    app: import("./config/apps").AppConfig;
+    db: import("./db/client").AppDb;
+    principal: import("./auth/service-tokens").AuthenticatedPrincipal;
+  };
+};

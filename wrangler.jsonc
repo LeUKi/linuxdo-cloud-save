@@ -1,0 +1,23 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "linuxdo-cloud-save",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-06-28",
+	"observability": {
+		"enabled": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "linuxdo-cloud-save",
+			"database_id": "56b00910-a9af-4563-bec3-fa9d85f60888",
+			"migrations_dir": "migrations"
+		}
+	],
+	"vars": {
+		"SERVICE_ISSUER": "linuxdo-cloud-save",
+		"LINUX_DO_OAUTH_AUTHORIZE_URL": "https://connect.linux.do/oauth2/authorize",
+		"LINUX_DO_OAUTH_TOKEN_URL": "https://connect.linux.do/oauth2/token",
+		"LINUX_DO_USERINFO_URL": "https://connect.linux.do/api/user"
+	}
+}
