@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import type { AppConfig } from "../config/apps";
+import type { AppConfig, TokenStrategy } from "../config/apps";
 import type { AppDb } from "../db/client";
 import { users } from "../db/schema";
 import type { WorkerEnv } from "../env";
@@ -17,10 +17,11 @@ export async function issueServiceToken(options: {
   db: AppDb;
   env: WorkerEnv;
   app: AppConfig;
+  tokenStrategy: TokenStrategy;
   userId: number;
   linuxDoId: string;
 }): Promise<{ token: string; tokenType: "Bearer"; tokenKind: "opaque_reuse" | "jwt"; reused?: boolean }> {
-  if (options.app.tokenStrategy === "opaque_reuse") {
+  if (options.tokenStrategy === "opaque_reuse") {
     const result = await issueOrReuseOpaqueToken({
       db: options.db,
       userId: options.userId,

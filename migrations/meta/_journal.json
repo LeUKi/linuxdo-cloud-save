@@ -15,6 +15,13 @@
       "when": 1782692707662,
       "tag": "0001_polite_jack_power",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1782718467024,
+      "tag": "0002_auth_flow_code_exchange",
+      "breakpoints": true
     }
   ]
 }

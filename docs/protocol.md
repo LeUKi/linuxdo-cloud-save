@@ -2,24 +2,53 @@
 
 ## Login
 
-1. Local app opens:
+1. Client generates a high-entropy local `verifier` and computes:
 
    ```text
-   https://<worker>/auth/start?app=<appId>&redirect_uri=<url-encoded-local-callback>
+   challenge = base64url(sha256(verifier))
    ```
 
-2. Worker validates `app` and `redirect_uri` against hardcoded config.
-3. Worker creates one-time D1 OAuth state with PKCE verifier/challenge.
-4. Worker redirects to Linux DO Connect authorize URL.
-5. Linux DO redirects back to `/auth/callback`.
-6. Worker consumes state, exchanges code, fetches user info, upserts the user, and issues the app's configured service token.
-7. Worker redirects to the original allowed target with query params:
+2. Client opens:
 
    ```text
-   token=<bearer-token>&token_type=Bearer&token_kind=<opaque_reuse|jwt>&app=<appId>&linux_do_id=<id>
+   https://<worker>/auth/start?app=<appId>&flow=<flowId>&challenge=<challenge>
    ```
 
-The local app should immediately store the token in its local secure storage and remove it from visible/browser history where possible.
+3. Worker validates `app` and `flow` against hardcoded config and stores the client `challenge` in one-time OAuth state.
+4. Worker redirects to Linux DO Connect authorize URL using the configured Worker-owned callback path, such as `/auth/callback/browser_code`.
+5. Linux DO redirects back to the configured Worker callback.
+6. Worker consumes state, exchanges the Linux DO code, fetches user info, upserts the user, and creates a short-lived one-time exchange code.
+7. Worker redirects to the configured completion page:
+
+   ```text
+   /auth/complete/<flowId>?code=<one-time-exchange-code>&app=<appId>&flow=<flowId>
+   ```
+
+8. Client reads only the one-time code, then exchanges it:
+
+   ```http
+   POST /auth/exchange
+   Content-Type: application/json
+
+   {
+     "code": "<one-time-exchange-code>",
+     "verifier": "<client-held-verifier>"
+   }
+   ```
+
+9. Worker atomically consumes the exchange code only when `code + verifier` match and returns:
+
+   ```json
+   {
+     "token": "<bearer-token>",
+     "token_type": "Bearer",
+     "token_kind": "opaque_reuse",
+     "app": "sample-notes",
+     "linux_do_id": "332940"
+   }
+   ```
+
+The completion URL never carries a Bearer token. The one-time exchange code is short-lived and cannot be redeemed without the original verifier.
 
 ## Private Save Slots
 

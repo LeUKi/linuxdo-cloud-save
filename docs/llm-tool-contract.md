@@ -25,7 +25,7 @@ MCP is useful when an MCP-compatible client should discover and call tools throu
 - no local MCP adapter
 - no SDK or TypeScript executor
 - no new API routes
-- no changes to OAuth, Bearer tokens, public write keys, or D1 tables
+- no model-visible OAuth, Bearer token, public write key, or D1-table operations
 
 The contract only describes how your own application should expose model tools and map tool calls to the existing REST API.
 

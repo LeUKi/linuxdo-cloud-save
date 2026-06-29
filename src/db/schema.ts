@@ -20,7 +20,8 @@ export const oauthStates = sqliteTable(
   {
     state: text("state").primaryKey(),
     appId: text("app_id").notNull(),
-    redirectUri: text("redirect_uri").notNull(),
+    flowId: text("flow_id").notNull(),
+    exchangeChallenge: text("exchange_challenge").notNull(),
     codeVerifier: text("code_verifier"),
     pkceEnabled: integer("pkce_enabled", { mode: "boolean" }).notNull().default(true),
     expiresAt: text("expires_at").notNull(),
@@ -28,6 +29,26 @@ export const oauthStates = sqliteTable(
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`)
   },
   (table) => [index("oauth_states_expires_at_idx").on(table.expiresAt)]
+);
+
+export const authExchangeCodes = sqliteTable(
+  "auth_exchange_codes",
+  {
+    codeHash: text("code_hash").primaryKey(),
+    appId: text("app_id").notNull(),
+    flowId: text("flow_id").notNull(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    exchangeChallenge: text("exchange_challenge").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    consumedAt: text("consumed_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`)
+  },
+  (table) => [
+    index("auth_exchange_codes_expires_at_idx").on(table.expiresAt),
+    index("auth_exchange_codes_user_app_idx").on(table.userId, table.appId)
+  ]
 );
 
 export const serviceTokens = sqliteTable(

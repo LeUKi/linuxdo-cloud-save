@@ -1,13 +1,14 @@
 import { and, eq, gt, isNull } from "drizzle-orm";
-import type { AppConfig } from "../config/apps";
+import type { AppConfig, AuthFlowConfig } from "../config/apps";
 import type { AppDb } from "../db/client";
-import { oauthStates, users } from "../db/schema";
+import { authExchangeCodes, oauthStates, users } from "../db/schema";
 import type { WorkerEnv } from "../env";
-import { createId, randomBase64Url } from "../utils/crypto";
+import { createId, hmacSha256Base64Url, randomBase64Url } from "../utils/crypto";
 import { createPkceChallenge, createPkceVerifier } from "../utils/pkce";
 import { addSecondsIso, nowIso } from "../utils/time";
 
 const STATE_TTL_SECONDS = 10 * 60;
+const EXCHANGE_CODE_PREFIX = "ldc";
 
 export interface OAuthStateRecord {
   state: string;
@@ -25,7 +26,8 @@ export async function createOAuthState(options: {
   db: AppDb;
   env: WorkerEnv;
   app: AppConfig;
-  redirectUri: string;
+  flow: AuthFlowConfig;
+  exchangeChallenge: string;
   callbackUrl: string;
   pkceEnabled?: boolean;
 }): Promise<OAuthStateRecord> {
@@ -46,7 +48,8 @@ export async function createOAuthState(options: {
   await options.db.insert(oauthStates).values({
     state,
     appId: options.app.id,
-    redirectUri: options.redirectUri,
+    flowId: options.flow.id,
+    exchangeChallenge: options.exchangeChallenge,
     codeVerifier: verifier,
     pkceEnabled,
     expiresAt: addSecondsIso(STATE_TTL_SECONDS),
@@ -56,24 +59,95 @@ export async function createOAuthState(options: {
   return { state, authorizeUrl: authorizeUrl.toString() };
 }
 
-export async function consumeOAuthState(options: { db: AppDb; state: string }): Promise<{
+export async function consumeOAuthState(options: { db: AppDb; state: string; flowId?: string }): Promise<{
   appId: string;
-  redirectUri: string;
+  flowId: string;
+  exchangeChallenge: string;
   codeVerifier: string | null;
 } | null> {
   const now = nowIso();
+  const predicates = [
+    eq(oauthStates.state, options.state),
+    isNull(oauthStates.consumedAt),
+    gt(oauthStates.expiresAt, now)
+  ];
+  if (options.flowId) predicates.push(eq(oauthStates.flowId, options.flowId));
   const record = await options.db
     .update(oauthStates)
     .set({ consumedAt: now })
-    .where(and(eq(oauthStates.state, options.state), isNull(oauthStates.consumedAt), gt(oauthStates.expiresAt, now)))
+    .where(and(...predicates))
     .returning({
       appId: oauthStates.appId,
-      redirectUri: oauthStates.redirectUri,
+      flowId: oauthStates.flowId,
+      exchangeChallenge: oauthStates.exchangeChallenge,
       codeVerifier: oauthStates.codeVerifier
     })
     .get();
   if (!record) return null;
-  return { appId: record.appId, redirectUri: record.redirectUri, codeVerifier: record.codeVerifier };
+  return {
+    appId: record.appId,
+    flowId: record.flowId,
+    exchangeChallenge: record.exchangeChallenge,
+    codeVerifier: record.codeVerifier
+  };
+}
+
+export async function hashExchangeCode(pepper: string, code: string): Promise<string> {
+  return hmacSha256Base64Url(pepper, code);
+}
+
+export async function createAuthExchangeCode(options: {
+  db: AppDb;
+  pepper: string;
+  appId: string;
+  flowId: string;
+  userId: number;
+  exchangeChallenge: string;
+  ttlSeconds: number;
+}): Promise<{ code: string; expiresAt: string }> {
+  const code = createId(EXCHANGE_CODE_PREFIX);
+  const expiresAt = addSecondsIso(options.ttlSeconds);
+  await options.db.insert(authExchangeCodes).values({
+    codeHash: await hashExchangeCode(options.pepper, code),
+    appId: options.appId,
+    flowId: options.flowId,
+    userId: options.userId,
+    exchangeChallenge: options.exchangeChallenge,
+    expiresAt,
+    createdAt: nowIso()
+  });
+  return { code, expiresAt };
+}
+
+export async function consumeAuthExchangeCode(options: {
+  db: AppDb;
+  pepper: string;
+  code: string;
+  verifier: string;
+}): Promise<{ appId: string; flowId: string; userId: number } | null> {
+  const now = nowIso();
+  const exchangeChallenge = await createPkceChallenge(options.verifier);
+  const codeHash = await hashExchangeCode(options.pepper, options.code);
+  const record = await options.db
+    .update(authExchangeCodes)
+    .set({ consumedAt: now })
+    .where(
+      and(
+        eq(authExchangeCodes.codeHash, codeHash),
+        eq(authExchangeCodes.exchangeChallenge, exchangeChallenge),
+        isNull(authExchangeCodes.consumedAt),
+        gt(authExchangeCodes.expiresAt, now)
+      )
+    )
+    .returning({
+      appId: authExchangeCodes.appId,
+      flowId: authExchangeCodes.flowId,
+      userId: authExchangeCodes.userId
+    })
+    .get();
+
+  if (!record) return null;
+  return record;
 }
 
 export async function exchangeCodeForLinuxDoAccessToken(options: {

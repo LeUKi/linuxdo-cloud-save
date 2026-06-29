@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { app } from "../src/index";
-import { createOAuthState } from "../src/auth/oauth";
 import { issueServiceJwt } from "../src/auth/jwt";
 import { issueServiceToken } from "../src/auth/service-tokens";
 import { getAppConfig } from "../src/config/apps";
 import { createDb } from "../src/db/client";
 import { users } from "../src/db/schema";
+import { createPkceChallenge } from "../src/utils/pkce";
 import { migratedDb } from "./d1";
 import { testEnv } from "./env";
 
@@ -21,30 +21,29 @@ async function setupUser(appId = "sample-notes") {
 }
 
 describe("adversarial e2e behavior", () => {
-  it("rejects malicious auth start redirects before Linux DO redirect", async () => {
+  it("rejects invalid auth start requests before Linux DO redirect", async () => {
     const d1 = await migratedDb();
     const env = testEnv(d1);
+    const challenge = await createPkceChallenge("verifier");
     const cases = [
-      "/auth/start?app=sample-notes&redirect_uri=https%3A%2F%2Fevil.example%2Fcallback",
-      "/auth/start?app=sample-notes&redirect_uri=http%3A%2F%2Fuser%3Apass%40127.0.0.1%3A39871%2Flinuxdo%2Fcallback",
-      "/auth/start?app=sample-notes&redirect_uri=http%3A%2F%2F127.0.0.1%3A39871%2F%255clinuxdo%2Fcallback"
+      "/auth/start?app=sample-notes",
+      "/auth/start?app=sample-notes&flow=missing",
+      "/auth/start?app=sample-notes&flow=browser_code",
+      "/auth/start?app=sample-notes&flow=browser_code&challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      `/auth/start?app=sample-notes&flow=browser_code&challenge=${challenge}&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcallback`
     ];
     for (const url of cases) {
       const response = await app.request(url, {}, env);
       expect(response.status).toBe(400);
-      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_redirect_uri" } });
+      const payload = await response.json() as { error: { code: string } };
+      expect(payload.error.code).toMatch(/invalid_request|unknown_flow|invalid_challenge/u);
     }
   });
 
-  it("performs OAuth callback token redirect and prevents state replay", async () => {
-    const { env, db, appConfig } = await setupUser("sample-notes");
-    const state = await createOAuthState({
-      db,
-      env,
-      app: appConfig,
-      redirectUri: "http://127.0.0.1:39871/linuxdo/callback",
-      callbackUrl: "https://worker.example/auth/callback"
-    });
+  it("performs verifier-bound code exchange and prevents state/code replay", async () => {
+    const { env } = await setupUser("linuxdo-friends");
+    const verifier = "correct-e2e-verifier";
+    const challenge = await createPkceChallenge(verifier);
     const calls: string[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input, init) => {
@@ -62,15 +61,57 @@ describe("adversarial e2e behavior", () => {
       return new Response("not found", { status: 404 });
     }) as typeof fetch;
     try {
-      const first = await app.request(`/auth/callback?code=code-1&state=${encodeURIComponent(state.state)}`, {}, env);
-      expect(first.status).toBe(302);
-      const redirected = new URL(first.headers.get("location") ?? "http://missing");
-      expect(redirected.origin).toBe("http://127.0.0.1:39871");
-      expect(redirected.searchParams.get("token_type")).toBe("Bearer");
-      expect(redirected.searchParams.get("token_kind")).toBe("opaque_reuse");
-      expect(redirected.searchParams.get("token")?.length).toBeGreaterThan(20);
+      const start = await app.request(`/auth/start?app=linuxdo-friends&flow=browser_code&challenge=${challenge}`, {}, env);
+      expect(start.status).toBe(302);
+      const authorizeUrl = new URL(start.headers.get("location") ?? "http://missing");
+      const state = authorizeUrl.searchParams.get("state");
+      expect(state).toBeTruthy();
+      expect(new URL(authorizeUrl.searchParams.get("redirect_uri") ?? "http://missing").pathname).toBe(
+        "/auth/callback/browser_code"
+      );
 
-      const replay = await app.request(`/auth/callback?code=code-2&state=${encodeURIComponent(state.state)}`, {}, env);
+      const callback = await app.request(`/auth/callback/browser_code?code=code-1&state=${encodeURIComponent(state ?? "")}`, {}, env);
+      expect(callback.status).toBe(302);
+      const completionUrl = new URL(callback.headers.get("location") ?? "http://missing");
+      expect(completionUrl.pathname).toBe("/auth/complete/browser_code");
+      const exchangeCode = completionUrl.searchParams.get("code");
+      expect(exchangeCode).toBeTruthy();
+      expect(completionUrl.searchParams.has("token")).toBe(false);
+
+      const page = await app.request(completionUrl.pathname + completionUrl.search, {}, env);
+      expect(page.status).toBe(200);
+      expect(page.headers.get("cache-control")).toBe("no-store");
+      const html = await page.text();
+      expect(html).toContain(exchangeCode ?? "missing");
+      expect(html).not.toContain("Bearer");
+      expect(html).not.toContain("token_type");
+
+      const wrongVerifier = await app.request("/auth/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: exchangeCode, verifier: "wrong-verifier" })
+      }, env);
+      expect(wrongVerifier.status).toBe(400);
+
+      const exchanged = await app.request("/auth/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: exchangeCode, verifier })
+      }, env);
+      expect(exchanged.status).toBe(200);
+      expect(exchanged.headers.get("cache-control")).toBe("no-store");
+      const tokenPayload = await exchanged.json() as Record<string, string>;
+      expect(tokenPayload).toMatchObject({ token_type: "Bearer", token_kind: "jwt", app: "linuxdo-friends", linux_do_id: "10086" });
+      expect(tokenPayload.token?.length).toBeGreaterThan(20);
+
+      const codeReplay = await app.request("/auth/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: exchangeCode, verifier })
+      }, env);
+      expect(codeReplay.status).toBe(400);
+
+      const replay = await app.request(`/auth/callback/browser_code?code=code-2&state=${encodeURIComponent(state ?? "")}`, {}, env);
       expect(replay.status).toBe(400);
       await expect(replay.json()).resolves.toMatchObject({ error: { code: "invalid_state" } });
       expect(calls).toEqual([env.LINUX_DO_OAUTH_TOKEN_URL, env.LINUX_DO_USERINFO_URL]);
@@ -105,7 +146,16 @@ describe("adversarial e2e behavior", () => {
 
   it("enforces slot payload limit and survives repeated overwrite/read", async () => {
     const { env, db, user, appConfig } = await setupUser("sample-notes");
-    const issued = await issueServiceToken({ db, env, app: appConfig, userId: user.id, linuxDoId: user.linuxDoId });
+    const flow = appConfig.authFlows[0];
+    if (!flow) throw new Error("setup failed");
+    const issued = await issueServiceToken({
+      db,
+      env,
+      app: appConfig,
+      tokenStrategy: flow.tokenStrategy,
+      userId: user.id,
+      linuxDoId: user.linuxDoId
+    });
     const headers = { authorization: `Bearer ${issued.token}`, "content-type": "application/json" };
     const oversize = await app.request("/api/apps/sample-notes/slots/settings", {
       method: "PUT",

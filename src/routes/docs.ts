@@ -23,7 +23,7 @@ export function rootHtml(): string {
         <li><a href="/health">Health check</a></li>
         <li><a href="${LLM_TOOL_CONTRACT_PATH}">LLM Tool Contract</a></li>
       </ul>
-      <p>API routes are intentionally UI-free. Use <code>/auth/start</code>, private slot routes, and public slot routes from your own clients.</p>
+      <p>API routes are intentionally UI-free. Use <code>/auth/start</code> and <code>/auth/exchange</code>, private slot routes, and public slot routes from your own clients.</p>
     </main>
   </body>
 </html>`;
@@ -56,7 +56,7 @@ MCP is useful when an MCP-compatible client should discover and call tools throu
 - no local MCP adapter
 - no SDK or TypeScript executor
 - no new API routes
-- no changes to OAuth, Bearer tokens, public write keys, or D1 tables
+- no model-visible OAuth, Bearer token, public write key, or D1-table operations
 
 ## Tools
 

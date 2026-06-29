@@ -4,7 +4,7 @@ This service is intentionally scoped for the author's own programs, not a public
 
 ## Trust Boundary
 
-Local apps are not confidential clients. Private save-slot authority is the Worker-issued Bearer token, validated server-side. Public write authority is a separate per-app write key that can only write configured public slots. App ids, redirect allowlists, private slot ids, public slot ids, payload limits, token strategy, and public write-key digests are hardcoded in source.
+Local apps are not confidential clients. Private save-slot authority is the Worker-issued Bearer token, validated server-side. Public write authority is a separate per-app write key that can only write configured public slots. App ids, auth flows, private slot ids, public slot ids, payload limits, token strategy, and public write-key digests are hardcoded in source.
 
 ## Token Strategies
 
@@ -23,17 +23,21 @@ Local apps are not confidential clients. Private save-slot authority is the Work
 - Does not perform normal per-request D1 revocation checks.
 - Coarse revocation is signing-secret rotation unless a future blacklist or token-version check is added.
 
-## Query Token Delivery
+## Code Exchange Delivery
 
-The callback redirects with `token` in the URL query because that was selected for the first pass. This is not OAuth bearer-token best practice. Query tokens may leak through browser history, logs, screenshots, crash reports, URL previews, and copy/paste.
+The configured `code_exchange` flow never puts the long-term Bearer token in the callback URL. The callback path creates a short-lived one-time exchange code and redirects to a Worker-owned completion page with that code. The client then calls `POST /auth/exchange` with the code and a locally held verifier.
 
-Compensating controls in this implementation:
+Controls in this implementation:
 
-- Redirect targets are validated at `/auth/start` and again at `/auth/callback`.
-- Redirect allowlists are per-app regexes in code.
-- Backslash-encoded and credential-bearing redirect URLs are rejected before regex matching.
+- Auth behavior is selected only by hardcoded per-app `authFlows`.
+- `/auth/start` requires an app id, flow id, and client challenge.
+- `/auth/start` does not accept caller-supplied `redirect_uri`.
+- The exchange code is stored as an HMAC hash, not plaintext.
+- The exchange code is short TTL and one-time.
+- Wrong verifier attempts do not consume a valid code.
+- Long-term service tokens are issued only after successful `/auth/exchange`.
 - Error responses do not include raw tokens.
-- Redaction helpers cover `Authorization` headers, `X-Public-Write-Key` headers, and token-like URL query params.
+- Redaction helpers cover `Authorization` headers, `X-Public-Write-Key` headers, and token-like URL query params including short-lived codes.
 
 ## Public Slots
 

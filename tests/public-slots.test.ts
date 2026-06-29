@@ -23,7 +23,16 @@ async function setupBearerToken(appId: string) {
   const user = await db.query.users.findFirst();
   const appConfig = getAppConfig(appId);
   if (!user || !appConfig) throw new Error("test setup failed");
-  const token = await issueServiceToken({ db, env, app: appConfig, userId: user.id, linuxDoId: user.linuxDoId });
+  const flow = appConfig.authFlows[0];
+  if (!flow) throw new Error("test setup failed");
+  const token = await issueServiceToken({
+    db,
+    env,
+    app: appConfig,
+    tokenStrategy: flow.tokenStrategy,
+    userId: user.id,
+    linuxDoId: user.linuxDoId
+  });
   return { env, token: token.token };
 }
 

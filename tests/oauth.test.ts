@@ -3,38 +3,48 @@ import { eq } from "drizzle-orm";
 import { getAppConfig } from "../src/config/apps";
 import { createDb } from "../src/db/client";
 import {
+  consumeAuthExchangeCode,
   consumeOAuthState,
+  createAuthExchangeCode,
   createOAuthState,
   exchangeCodeForLinuxDoAccessToken,
   fetchLinuxDoUserInfo,
+  hashExchangeCode,
   upsertLinuxDoUser
 } from "../src/auth/oauth";
 import { testEnv } from "./env";
 import { migratedDb } from "./d1";
-import { users } from "../src/db/schema";
+import { authExchangeCodes, users } from "../src/db/schema";
+import { createPkceChallenge } from "../src/utils/pkce";
 
 describe("oauth support", () => {
-  it("creates and consumes one-time state with PKCE fields", async () => {
+  it("creates and consumes one-time state with flow and PKCE fields", async () => {
     const d1 = await migratedDb();
     const db = createDb(d1);
     const env = testEnv(d1);
     const app = getAppConfig("sample-notes");
     expect(app).toBeDefined();
     if (!app) return;
+    const flow = app.authFlows[0];
+    expect(flow).toBeDefined();
+    if (!flow) return;
+    const exchangeChallenge = await createPkceChallenge("exchange-verifier");
 
     const state = await createOAuthState({
       db,
       env,
       app,
-      redirectUri: "http://127.0.0.1:39871/linuxdo/callback",
-      callbackUrl: "https://worker.example/auth/callback"
+      flow,
+      exchangeChallenge,
+      callbackUrl: "https://worker.example/auth/callback/browser_code"
     });
     const authorizeUrl = new URL(state.authorizeUrl);
     expect(authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorizeUrl.searchParams.get("state")).toBe(state.state);
+    expect(authorizeUrl.searchParams.get("redirect_uri")).toBe("https://worker.example/auth/callback/browser_code");
 
     const consumed = await consumeOAuthState({ db, state: state.state });
-    expect(consumed).toMatchObject({ appId: "sample-notes", redirectUri: "http://127.0.0.1:39871/linuxdo/callback" });
+    expect(consumed).toMatchObject({ appId: "sample-notes", flowId: "browser_code", exchangeChallenge });
     expect(consumed?.codeVerifier).toBeTruthy();
     await expect(consumeOAuthState({ db, state: state.state })).resolves.toBeNull();
   });
@@ -46,13 +56,17 @@ describe("oauth support", () => {
     const app = getAppConfig("sample-notes");
     expect(app).toBeDefined();
     if (!app) return;
+    const flow = app.authFlows[0];
+    expect(flow).toBeDefined();
+    if (!flow) return;
 
     const state = await createOAuthState({
       db,
       env,
       app,
-      redirectUri: "http://127.0.0.1:39871/linuxdo/callback",
-      callbackUrl: "https://worker.example/auth/callback"
+      flow,
+      exchangeChallenge: await createPkceChallenge("exchange-verifier"),
+      callbackUrl: "https://worker.example/auth/callback/browser_code"
     });
 
     const results = await Promise.all([
@@ -61,6 +75,74 @@ describe("oauth support", () => {
     ]);
     expect(results.filter(Boolean)).toHaveLength(1);
     expect(results.filter((value) => value === null)).toHaveLength(1);
+  });
+
+  it("does not consume OAuth state when expected flow mismatches", async () => {
+    const d1 = await migratedDb();
+    const db = createDb(d1);
+    const env = testEnv(d1);
+    const app = getAppConfig("sample-notes");
+    expect(app).toBeDefined();
+    if (!app) return;
+    const flow = app.authFlows[0];
+    expect(flow).toBeDefined();
+    if (!flow) return;
+
+    const state = await createOAuthState({
+      db,
+      env,
+      app,
+      flow,
+      exchangeChallenge: await createPkceChallenge("exchange-verifier"),
+      callbackUrl: "https://worker.example/auth/callback/browser_code"
+    });
+
+    await expect(consumeOAuthState({ db, state: state.state, flowId: "wrong_flow" })).resolves.toBeNull();
+    await expect(consumeOAuthState({ db, state: state.state, flowId: "browser_code" })).resolves.toMatchObject({
+      appId: "sample-notes",
+      flowId: "browser_code"
+    });
+  });
+
+  it("creates hashed one-time exchange codes and does not consume on verifier mismatch", async () => {
+    const d1 = await migratedDb();
+    const db = createDb(d1);
+    const env = testEnv(d1);
+    await db.insert(users).values({ linuxDoId: "exchange-user", username: "exchange" });
+    const user = await db.query.users.findFirst();
+    expect(user).toBeDefined();
+    if (!user) return;
+
+    const exchangeChallenge = await createPkceChallenge("correct-verifier");
+    const exchange = await createAuthExchangeCode({
+      db,
+      pepper: env.SERVICE_TOKEN_PEPPER,
+      appId: "linuxdo-friends",
+      flowId: "browser_code",
+      userId: user.id,
+      exchangeChallenge,
+      ttlSeconds: 60
+    });
+    const row = await db.query.authExchangeCodes.findFirst({
+      where: eq(authExchangeCodes.codeHash, await hashExchangeCode(env.SERVICE_TOKEN_PEPPER, exchange.code))
+    });
+    expect(row?.codeHash).not.toBe(exchange.code);
+    expect(row?.exchangeChallenge).toBe(exchangeChallenge);
+
+    await expect(
+      consumeAuthExchangeCode({ db, pepper: env.SERVICE_TOKEN_PEPPER, code: exchange.code, verifier: "wrong-verifier" })
+    ).resolves.toBeNull();
+    const afterWrongVerifier = await db.query.authExchangeCodes.findFirst({
+      where: eq(authExchangeCodes.codeHash, await hashExchangeCode(env.SERVICE_TOKEN_PEPPER, exchange.code))
+    });
+    expect(afterWrongVerifier?.consumedAt).toBeNull();
+
+    await expect(
+      consumeAuthExchangeCode({ db, pepper: env.SERVICE_TOKEN_PEPPER, code: exchange.code, verifier: "correct-verifier" })
+    ).resolves.toMatchObject({ appId: "linuxdo-friends", flowId: "browser_code", userId: user.id });
+    await expect(
+      consumeAuthExchangeCode({ db, pepper: env.SERVICE_TOKEN_PEPPER, code: exchange.code, verifier: "correct-verifier" })
+    ).resolves.toBeNull();
   });
 
   it("exchanges code, fetches userinfo, and upserts linux do user through mocked fetch", async () => {
@@ -85,7 +167,7 @@ describe("oauth support", () => {
     const accessToken = await exchangeCodeForLinuxDoAccessToken({
       env,
       code: "code-1",
-      callbackUrl: "https://worker.example/auth/callback",
+      callbackUrl: "https://worker.example/auth/callback/browser_code",
       codeVerifier: "verifier",
       fetcher
     });

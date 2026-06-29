@@ -1,13 +1,13 @@
 # linuxdo-cloud-save
 
-`linuxdo-cloud-save` 是一个部署在 Cloudflare Workers 上的轻量云存档服务。用户通过 Linux DO Connect OAuth2 登录后，Worker 会把一个长期 Bearer token 重定向回被白名单允许的本地程序；本地程序再用这个 token 读写按应用和 slot 隔离的 JSON 存档。
+`linuxdo-cloud-save` 是一个部署在 Cloudflare Workers 上的轻量云存档服务。用户通过 Linux DO Connect OAuth2 登录后，Worker 会下发一个长期 Bearer token；客户端再用这个 token 读写按应用和 slot 隔离的 JSON 存档。
 
-这个项目的目标是服务自己写的程序，不是公开 SaaS 或通用开发者平台。应用 id、slot、跳转白名单、token 策略和公共写 key 摘要都硬编码在代码里，方便个人维护和审计。
+这个项目的目标是服务自己写的程序，不是公开 SaaS 或通用开发者平台。应用 id、slot、auth flow、token 策略和公共写 key 摘要都硬编码在代码里，方便个人维护和审计。
 
 ## 功能
 
 - Linux DO OAuth2 登录
-- 长期 Bearer token，下发方式为 OAuth 回调后的本地重定向
+- 长期 Bearer token，下发方式为 verifier 绑定的一次性 code exchange
 - 两种 token 策略：`opaque_reuse` 和 `jwt`
 - 私有用户存档 slot：`GET/PUT /api/apps/:appId/slots/:slotId`
 - 公共只读 slot：`GET /api/apps/:appId/public/:publicSlotId`
@@ -54,11 +54,10 @@
 
 - `id`：稳定应用标识，会出现在 API 路由里
 - `name`：显示名称
-- `tokenStrategy`：`opaque_reuse` 或 `jwt`
+- `authFlows`：显式登录/凭据交付 flow；每个 flow 配置 OAuth callback、完成页、token 策略和 code TTL
 - `slots`：允许访问的私有 slot
 - `publicSlots`：允许公开读取的公共 slot，内部存储名使用 `public:<id>`
 - `publicWriteKeySha256`：公共 slot 写 key 的 SHA-256 摘要
-- `redirectAllowlist`：OAuth 完成后允许重定向回去的 URL 正则白名单
 - `maxJsonBytes`：JSON payload 上限
 
 示例：
@@ -67,13 +66,22 @@
 {
   id: "linuxdo-friends",
   name: "LinuxDo Friends",
-  tokenStrategy: "jwt",
+  authFlows: [
+    {
+      id: "browser_code",
+      name: "Browser Code Exchange",
+      oauthCallbackPath: "/auth/callback/browser_code",
+      completionPath: "/auth/complete/browser_code",
+      tokenStrategy: "jwt",
+      delivery: {
+        kind: "code_exchange",
+        codeTtlSeconds: 60,
+        requireVerifier: true
+      }
+    }
+  ],
   maxJsonBytes: 64 * 1024,
-  slots: [{ id: "config" }],
-  redirectAllowlist: [
-    /^http:\/\/127\.0\.0\.1:\d{2,5}\/linuxdo\/callback$/,
-    /^chrome-extension:\/\/[a-p]{32}\/auth\/linuxdo$/
-  ]
+  slots: [{ id: "config" }]
 }
 ```
 
@@ -107,22 +115,22 @@ openssl rand -base64 32
 在 Linux DO Connect/OAuth 应用里配置回调地址：
 
 ```text
-https://<你的-worker-host>/auth/callback
+https://<你的-worker-host>/auth/callback/browser_code
 ```
 
 部署到 workers.dev 后通常类似：
 
 ```text
-https://<worker-name>.<your-subdomain>.workers.dev/auth/callback
+https://<worker-name>.<your-subdomain>.workers.dev/auth/callback/browser_code
 ```
 
 当前维护者实例的回调地址是：
 
 ```text
-https://linuxdo-cloud-save.lafish.workers.dev/auth/callback
+https://linuxdo-cloud-save.lafish.workers.dev/auth/callback/browser_code
 ```
 
-本地程序的回调地址不是填到 Linux DO 后台，而是作为 `/auth/start` 的 `redirect_uri` 参数传给 Worker，并由 `src/config/apps.ts` 里的 `redirectAllowlist` 校验。
+客户端自己的回调地址不填到 Linux DO 后台。客户端打开 `/auth/start?app=<appId>&flow=<flowId>&challenge=<challenge>`，Linux DO 只回到 Worker 自己的 `oauthCallbackPath`。Worker 随后跳到 `completionPath?code=<one-time-code>`，客户端用 `code + verifier` 调 `POST /auth/exchange` 换 Bearer token。
 
 ## 从新机器 CLI 完整部署
 
@@ -249,7 +257,7 @@ curl -fsS https://<你的-worker-host>/health
 测试 OAuth 起始跳转：
 
 ```sh
-curl -I "https://<你的-worker-host>/auth/start?app=linuxdo-friends&redirect_uri=http%3A%2F%2F127.0.0.1%3A39871%2Flinuxdo%2Fcallback"
+curl -I "https://<你的-worker-host>/auth/start?app=linuxdo-friends&flow=browser_code&challenge=<base64url-sha256-verifier>"
 ```
 
 期望返回 `302`，`location` 指向 Linux DO OAuth authorize endpoint。
@@ -300,8 +308,13 @@ bun run db:generate
 OAuth：
 
 ```http
-GET /auth/start?app=<appId>&redirect_uri=<url-encoded-local-callback>
-GET /auth/callback?code=<code>&state=<state>
+GET /auth/start?app=<appId>&flow=<flowId>&challenge=<base64url-sha256-verifier>
+GET /auth/callback/<flowId>?code=<linux-do-code>&state=<state>
+GET /auth/complete/<flowId>?code=<one-time-exchange-code>
+POST /auth/exchange
+Content-Type: application/json
+
+{"code":"<one-time-exchange-code>","verifier":"<client-held-verifier>"}
 ```
 
 私有 slot：
@@ -353,8 +366,9 @@ Content-Type: application/json
 ## 安全边界
 
 - 本项目默认服务自己写的程序，不假设本地客户端能保密。
-- OAuth 回调会把 Bearer token 放在 query string 里传回本地程序，客户端应立即保存并清理可见 URL。
-- `redirect_uri` 必须命中每个 app 的硬编码正则白名单。
+- OAuth 完成页只携带短 TTL、一次性的 exchange code，不携带 Bearer token。
+- `/auth/exchange` 必须同时提交 code 和客户端本地保存的 verifier，验证通过后才返回 Bearer token。
+- `app`、`flow`、token 策略和 slot 都必须命中代码里的硬编码配置。
 - 公共 slot 任何人都能读，只有匹配硬编码写 key 摘要才能写。
 - 不要把 Bearer token、Linux DO client secret、JWT signing secret、公共写 key 原文提交到仓库。
 
